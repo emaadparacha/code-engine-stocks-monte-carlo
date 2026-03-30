@@ -8,10 +8,8 @@ and sends the results via SMS (Twilio).
 Environment variables:
   STOCKS            – comma-separated tickers, e.g. "AAPL,MSFT,GOOGL,AMZN"
   INVEST_AMOUNT     – dollar amount to simulate (capped at $10,000)
-  TWILIO_ACCOUNT_SID
-  TWILIO_AUTH_TOKEN
-  TWILIO_FROM_NUMBER
-  TO_NUMBER
+  TWILIO_TOKEN
+  PHONE_NUMBER
   JOB_INDEX         – set automatically by Code Engine (0-based)
 """
 
@@ -68,34 +66,63 @@ def run_monte_carlo(log_returns: np.ndarray, invest_amount: float) -> dict:
 
     final_values = price_paths[:, -1]
 
+    # Worst case: most probable negative return (mode of the loss bucket)
+    # If all outcomes are positive, use the lowest return instead
+    losing_sims = final_values[final_values < invest_amount]
+    if len(losing_sims) > 0:
+        # Bin negative outcomes and find the peak (most likely loss)
+        hist_counts, bin_edges = np.histogram(losing_sims, bins=50)
+        peak_bin = np.argmax(hist_counts)
+        worst_likely = (bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2
+        prob_worst = float(hist_counts[peak_bin] / NUM_SIMULATIONS * 100)
+    else:
+        # All positive — just show the lowest return
+        worst_likely = float(np.min(final_values))
+        prob_worst = float(1 / NUM_SIMULATIONS * 100)
+
+    prob_loss = float(np.mean(final_values < invest_amount) * 100)
+
     return {
         "mean_final":    float(np.mean(final_values)),
-        "median_final":  float(np.median(final_values)),
-        "p5":            float(np.percentile(final_values, 5)),
-        "p95":           float(np.percentile(final_values, 95)),
-        "prob_profit":   float(np.mean(final_values > invest_amount) * 100),
-        "best_case":     float(np.max(final_values)),
-        "worst_case":    float(np.min(final_values)),
-        "annual_vol":    float(sigma * np.sqrt(252) * 100),  # annualised volatility %
+        "prob_profit":   float(100 - prob_loss),
+        "worst_likely":  float(worst_likely),
+        "prob_worst":    prob_worst,
+        "prob_loss":     prob_loss,
     }
 
 
 def format_sms(ticker: str, amount: float, results: dict) -> str:
     """Build a concise SMS body with the simulation results."""
-    gain = results["mean_final"] - amount
-    gain_pct = (gain / amount) * 100
+    mean_val = results["mean_final"]
+    gain_pct = ((mean_val - amount) / amount) * 100
+
+    worst_val = results["worst_likely"]
+    worst_pct = ((worst_val - amount) / amount) * 100
+
+    prob = results["prob_profit"]
+
+    if prob >= 75:
+        buy_line = f"Buy or not: Yes - {prob:.0f}% of simulations were profitable with an avg return of {gain_pct:+.1f}%. The odds are strongly in your favour."
+    elif prob >= 50:
+        buy_line = f"Buy or not: Yes - more likely to profit ({prob:.0f}%) than not, but {100 - prob:.0f}% of simulations lost money. Don't bet the house."
+    elif prob >= 35:
+        buy_line = f"Buy or not: No - only {prob:.0f}% of simulations were profitable. You're basically flipping a weighted coin against yourself."
+    else:
+        buy_line = f"Buy or not: No - only {prob:.0f}% of simulations made money. This stock historically moves like a rollercoaster built by an intern."
 
     return (
-        f"📈 Monte Carlo results for {ticker}\n"
+        f"{ticker} - Monte Carlo Results\n"
+        f"Expected value: ${mean_val:,.0f} ({gain_pct:+.1f}%)\n"
+        f"Prob of profit: {prob:.1f}%\n"
+        f"Worst case scenario: ${worst_val:,.0f} ({worst_pct:+.1f}%)\n"
+        f"Prob of worst: {results['prob_worst']:.1f}%\n"
+        f"{buy_line}\n"
+        f"\n"
         f"Invested: ${amount:,.0f} | Sims: {NUM_SIMULATIONS:,}\n"
-        f"────────────────────\n"
-        f"Expected value: ${results['mean_final']:,.0f} ({gain_pct:+.1f}%)\n"
-        f"Median value:   ${results['median_final']:,.0f}\n"
-        f"5th–95th %%ile: ${results['p5']:,.0f} – ${results['p95']:,.0f}\n"
-        f"Prob of profit: {results['prob_profit']:.1f}%\n"
-        f"Best / Worst:   ${results['best_case']:,.0f} / ${results['worst_case']:,.0f}\n"
-        f"Annual vol:     {results['annual_vol']:.1f}%\n"
-        f"(1-year forecast from {HISTORY_YEARS}yr history)"
+        f"\n"
+        f"This simulation cannot be held accountable for "
+        f"any losses from its suggestions, but any profits "
+        f"must be shared 50/50."
     )
 
 
